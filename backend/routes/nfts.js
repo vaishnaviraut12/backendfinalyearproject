@@ -1,81 +1,74 @@
 const express = require("express");
-const router  = express.Router();
-const NFT     = require("../models/NFT");
+const router = express.Router();
+const NFT = require("../models/NFT");
+const jwt = require("jsonwebtoken");
 
-// ─── GET /api/nfts/all ───────────────────────────────────────────────────────
-// Returns ALL NFTs from all users — used as marketplace fallback when blockchain is offline
-// MUST be defined BEFORE /:email to avoid Express treating "all" as an email param
-router.get("/all", async (req, res) => {
+const authMiddleware = (req, res, next) => {
   try {
-    const nfts = await NFT.find({}).sort({ createdAt: -1 });
-    res.json(nfts);
-  } catch (err) {
-    res.status(500).json({ error: "Server error fetching all NFTs" });
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) return res.status(401).json({ message: "Authorization required" });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ message: "Invalid or expired token" });
   }
-});
+};
 
-// ─── POST /api/nfts/save ─────────────────────────────────────────────────────
-router.post("/save", async (req, res) => {
+router.post("/mint", authMiddleware, async (req, res) => {
   try {
-    const { ownerEmail, tokenId, name, description, image, category, price, seller, owner, tokenURI } = req.body;
-    if (!ownerEmail || !tokenId)
-      return res.status(400).json({ error: "ownerEmail and tokenId are required" });
-    const nft = await NFT.findOneAndUpdate(
-      { ownerEmail: ownerEmail.toLowerCase(), tokenId: String(tokenId) },
-      { $set: { name, description, image, category, price, seller, owner, tokenURI, ownerEmail: ownerEmail.toLowerCase() } },
-      { new: true, upsert: true }
-    );
-    res.status(201).json({ message: "NFT saved successfully", nft });
-  } catch (err) {
-    res.status(500).json({ error: "Server error saving NFT" });
-  }
-});
+    const { tokenId, name, description, image, price, walletAddress, transactionHash, contractAddress } = req.body;
+    if (!tokenId || !name || !image || !walletAddress)
+      return res.status(400).json({ message: "Missing required NFT fields" });
 
-// ─── POST /api/nfts/transfer ─────────────────────────────────────────────────
-router.post("/transfer", async (req, res) => {
-  try {
-    const { tokenId, newOwnerEmail, newOwner } = req.body;
-    if (!tokenId || !newOwnerEmail || !newOwner)
-      return res.status(400).json({ error: "tokenId, newOwnerEmail and newOwner are required" });
-    const nft = await NFT.findOne({ tokenId: String(tokenId) });
-    if (!nft) return res.status(404).json({ error: "NFT not found" });
-    nft.ownerEmail = newOwnerEmail.toLowerCase();
-    nft.owner      = newOwner;
+    const existing = await NFT.findOne({ tokenId, contractAddress });
+    if (existing)
+      return res.status(400).json({ message: "NFT with this tokenId already exists" });
+
+    const nft = new NFT({ tokenId, name, description, image, price: price || 0, owner: walletAddress, creator: walletAddress, transactionHash, contractAddress, isListed: false });
     await nft.save();
-    res.json({ message: "NFT transferred successfully", nft });
-  } catch (err) {
-    res.status(500).json({ error: "Server error transferring NFT" });
+    res.status(201).json({ message: "NFT minted and saved", nft });
+  } catch (error) {
+    console.error("Mint error:", error);
+    res.status(500).json({ message: "Server error during NFT save" });
   }
 });
 
-// ─── DELETE /api/nfts/one/:tokenId ───────────────────────────────────────────
-router.delete("/one/:tokenId", async (req, res) => {
+router.get("/marketplace", async (req, res) => {
   try {
-    await NFT.findOneAndDelete({ tokenId: req.params.tokenId });
-    res.json({ message: "NFT removed" });
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ─── DELETE /api/nfts/clear/:email ───────────────────────────────────────────
-router.delete("/clear/:email", async (req, res) => {
-  try {
-    const result = await NFT.deleteMany({ ownerEmail: req.params.email.toLowerCase() });
-    res.json({ message: `Deleted ${result.deletedCount} NFTs successfully` });
-  } catch (err) {
-    res.status(500).json({ error: "Server error clearing NFTs" });
-  }
-});
-
-// ─── GET /api/nfts/:email ─── MUST be last ───────────────────────────────────
-// Returns NFTs belonging to a specific user email
-router.get("/:email", async (req, res) => {
-  try {
-    const nfts = await NFT.find({ ownerEmail: req.params.email.toLowerCase() }).sort({ createdAt: -1 });
+    const nfts = await NFT.find({ isListed: true }).sort({ createdAt: -1 });
     res.json(nfts);
-  } catch (err) {
-    res.status(500).json({ error: "Server error fetching NFTs" });
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching marketplace NFTs" });
+  }
+});
+
+router.get("/my-nfts/:walletAddress", async (req, res) => {
+  try {
+    const nfts = await NFT.find({ owner: req.params.walletAddress });
+    res.json(nfts);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching user NFTs" });
+  }
+});
+
+router.put("/list/:tokenId", authMiddleware, async (req, res) => {
+  try {
+    const { price } = req.body;
+    const nft = await NFT.findOneAndUpdate({ tokenId: req.params.tokenId }, { isListed: true, price }, { new: true });
+    res.json({ message: "NFT listed for sale", nft });
+  } catch (error) {
+    res.status(500).json({ message: "Error listing NFT" });
+  }
+});
+
+router.put("/transfer/:tokenId", async (req, res) => {
+  try {
+    const { newOwner, transactionHash } = req.body;
+    const nft = await NFT.findOneAndUpdate({ tokenId: req.params.tokenId }, { owner: newOwner, isListed: false, transactionHash }, { new: true });
+    res.json({ message: "NFT ownership transferred", nft });
+  } catch (error) {
+    res.status(500).json({ message: "Error transferring NFT" });
   }
 });
 
