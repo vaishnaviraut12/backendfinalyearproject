@@ -11,7 +11,7 @@ import "./App.css";
 import Sidebar from "./components/Sidebar";
 
 // 1. Define your API at the very top (outside the component)
-const API = process.env.REACT_APP_API_URL || "http://localhost:5000";
+const API = process.env.REACT_APP_API_URL || "https://backendfinalyearproject.onrender.com";
 
 // 2. Inside your App component, update your connection logic:
 const loadBlockchainData = async () => {
